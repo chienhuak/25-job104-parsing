@@ -122,3 +122,11 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+
+credentials.json
+token.json
+jobs_backup.csv
+
+
+
