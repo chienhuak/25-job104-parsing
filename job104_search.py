@@ -1,6 +1,7 @@
 import os
 import requests
-import time
+import time #計算時間
+import datetime #顯示時間戳記
 import pandas as pd
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -28,7 +29,7 @@ def normalize(value):
         return str(value)
 
 
-def fetch_today_jobs(city_list):
+def fetch_today_jobs(city_list, kw):
     """抓取 104 職缺資料，只要指定的城市"""
     headers = {
         "User-Agent": "Mozilla/5.0",
@@ -40,7 +41,7 @@ def fetch_today_jobs(city_list):
         params = {
             "ro": "0",
             "kwop": "7",
-            "keyword": "python", # 參數設成 "SQL" 就是找關鍵字含 SQL 的職缺
+            "keyword": kw, # 多關鍵字的變數
             "area": city,  # 城市代碼
             "isnew": "0",  # 參數設成 "0" 是今天更新職缺（0 代表今天，3 是三天內，7 是一週內，依官方規範）
             "mode": "l",
@@ -59,16 +60,22 @@ def fetch_today_jobs(city_list):
             detail = fetch_job_detail(job_id)   
             
             all_jobs.append({
+                "時間": datetime.datetime.now().strftime("%Y-%m-%d"),
+                "關鍵字": kw,
                 "職缺名稱": job.get("jobName"),
                 "公司名稱": job.get("custName"),
                 "地區": job.get("jobAddrNoDesc"),
                 "薪資": job.get("salaryDesc"),
-                "網址": f"https://www.104.com.tw/job/{job.get('link', {}).get('job', '').split('/')[-1]}",
-                #for字串 "網址": f"https://www.104.com.tw/job/{job.get('link').split('/')[-1]}"
                 "工作內容": detail["工作內容"],
-                "聯絡方式": detail["聯絡方式"]
+                "擅長工具": detail["擅長工具"],
+                "其他條件": detail["其他條件"],
+                "聯絡人": detail["聯絡人"],
+                "電話": detail["電話"],
+                "E-mail": detail["E-mail"],
+                "網址": f"https://www.104.com.tw/job/{job.get('link', {}).get('job', '').split('/')[-1]}"
+                #for字串 "網址": f"https://www.104.com.tw/job/{job.get('link').split('/')[-1]}"
             })
-            time.sleep(0.1)  # 避免太快被封
+            time.sleep(0.05)  # 避免太快被封
 
     return all_jobs
 
@@ -87,10 +94,15 @@ def fetch_job_detail(job_id):
 
     job_detail = data.get("data", {}).get("jobDetail", {})
     contact_info = data.get("data", {}).get("contact", {})
+    condition = data.get("data", {}).get("condition", {})
 
     return {
         "工作內容": normalize(job_detail.get("jobDescription", "").strip()),
-        "聯絡方式": normalize(contact_info.get("email", "") or contact_info.get("phone", "") or "未公開")
+        "聯絡人": normalize(contact_info.get("hrName", "") or "NA"),
+        "E-mail": normalize(contact_info.get("email", "") or "NA"),
+        "電話": normalize(contact_info.get("phone", "") or "NA"),
+        "擅長工具": normalize([s.get("description") for s in condition.get("skill", [])]),
+        "其他條件": normalize(condition.get("other", "").strip())
     }
 
 
@@ -117,25 +129,51 @@ def write_to_gsheet(data):
         values.append(list(row.values()))
 
     body = {"values": values}
-    service.spreadsheets().values().update(
+    # 使用update方法，寫入googlesheet時會覆寫資料
+    # service.spreadsheets().values().update(
+    #     spreadsheetId=SPREADSHEET_ID,
+    #     range=f"{SHEET_NAME}!A1",
+    #     valueInputOption="RAW",
+    #     body=body
+    # ).execute()
+
+    # 使用append方法寫入追加第二個關鍵字的資料(欄位名會再寫入)
+    service.spreadsheets().values().append(
         spreadsheetId=SPREADSHEET_ID,
         range=f"{SHEET_NAME}!A1",
         valueInputOption="RAW",
+        insertDataOption="INSERT_ROWS",  # 直接新增列，不覆蓋
         body=body
     ).execute()
+    
+
+def write_to_csv(jobs, file_path="jobs_backup.csv"):
+    """將職缺資料寫入 CSV，若檔案存在就追加"""
+    df = pd.DataFrame(jobs)
+    # 如果檔案不存在，第一次寫入加上欄位名稱
+    if not os.path.exists(file_path):
+        df.to_csv(file_path, index=False, encoding="utf-8-sig", header=True)
+    else:
+        # 檔案已存在，追加到最後一行，不覆蓋原本資料
+        df.to_csv(file_path, mode="a", index=False, encoding="utf-8-sig", header=False)
+
 
 if __name__ == "__main__":
-    # 1. 抓取台北 & 新北
-    jobs = fetch_today_jobs(["6001001000", "6001002000"])  # 台北市、新北市代碼
-    if not jobs:
-        print("⚠️ 找不到職缺")
-        exit()
+    # 1. 抓取符合條件的職缺、寫入 Google Sheet: 
+    keywords = ["資料分析", "flask"]  # 多關鍵字
+    cities = ["6001001000", "6001002000"]  # 台北市、新北市代碼
+    # all_results = []
+    
+    for kw in keywords:
+        jobs = fetch_today_jobs(cities,kw)  
+        if not jobs:
+            print("⚠️ 找不到 {kw} 職缺")
+            continue
+        else:
+            write_to_gsheet(jobs)  # 每個關鍵字寫一次
+            print(f"✅ 已寫入 {kw} 職缺到 Google Sheet，共 {len(jobs)} 筆")
+            write_to_csv(jobs)  # 每個關鍵字寫一次
+            print(f"✅ 已備份 {kw} 職缺到 CSV，共 {len(jobs)} 筆")
 
-    # 2. 備份到 CSV
-    df = pd.DataFrame(jobs)
-    df.to_csv("jobs_backup.csv", index=False, encoding="utf-8-sig")
-    print(f"✅ 已備份 CSV，共 {len(jobs)} 筆")
 
-    # 3. 寫入 Google Sheet
-    write_to_gsheet(jobs)
-    print(f"✅ 已寫入 Google Sheet，共 {len(jobs)} 筆")
+
